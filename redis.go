@@ -1,4 +1,4 @@
-package exporter
+package main
 
 import (
 	"fmt"
@@ -84,7 +84,7 @@ func NewRedisExporter(redis RedisHost, namespace string) *Exporter {
 }
 
 // Describe outputs Redis metric descriptions.
-func (e *Exporter) Describe(ch chan<- *prometheus.Desc) {
+func (e *Exporter) Describe(ch chan <- *prometheus.Desc) {
 
 	for _, m := range e.metrics {
 		m.Describe(ch)
@@ -95,7 +95,7 @@ func (e *Exporter) Describe(ch chan<- *prometheus.Desc) {
 }
 
 // Collect fetches new metrics from the RedisHost and updates the appropriate metrics.
-func (e *Exporter) Collect(ch chan<- prometheus.Metric) {
+func (e *Exporter) Collect(ch chan <- prometheus.Metric) {
 	scrapes := make(chan scrapeResult)
 
 	e.Lock()
@@ -145,6 +145,7 @@ func includeMetric(name string) bool {
 		"used_cpu_user_children": true,
 
 		"repl_backlog_size": true,
+		"role": true,
 	}
 
 	if strings.HasPrefix(name, "db") {
@@ -156,7 +157,7 @@ func includeMetric(name string) bool {
 	return ok
 }
 
-func extractInfoMetrics(info, addr string, scrapes chan<- scrapeResult) error {
+func extractInfoMetrics(info, addr string, scrapes chan <- scrapeResult) error {
 
 	lines := strings.Split(info, "\r\n")
 
@@ -203,6 +204,15 @@ func extractInfoMetrics(info, addr string, scrapes chan<- scrapeResult) error {
 			continue
 		}
 
+		if split[0] == "role" {
+			var role float64 = 0
+			if split[1] == "master" {
+				role = 1
+			}
+			scrapes <- scrapeResult{Name: split[0], Addr: addr, Value: role}
+			continue
+		}
+
 		val, err := strconv.ParseFloat(split[1], 64)
 		if err != nil {
 			log.Printf("couldn't parse %s, err: %s", split[1], err)
@@ -213,24 +223,29 @@ func extractInfoMetrics(info, addr string, scrapes chan<- scrapeResult) error {
 	return nil
 }
 
-func extractConfigMetrics(config []string, addr string, scrapes chan<- scrapeResult) error {
+func extractConfigMetrics(config []string, addr string, scrapes chan <- scrapeResult) error {
 
-	if len(config)%2 != 0 {
+	if len(config) % 2 != 0 {
 		return fmt.Errorf("invalid config: %#v", config)
 	}
 
-	for pos := 0; pos < len(config)/2; pos++ {
-		val, err := strconv.ParseFloat(config[pos*2+1], 64)
+	for pos := 0; pos < len(config) / 2; pos++ {
+		val, err := strconv.ParseFloat(config[pos * 2 + 1], 64)
 		if err != nil {
-			log.Printf("couldn't parse %s, err: %s", config[pos*2+1], err)
+			log.Printf("couldn't parse %s, err: %s", config[pos * 2 + 1], err)
 			continue
 		}
-		scrapes <- scrapeResult{Name: fmt.Sprintf("config_%s", config[pos*2]), Addr: addr, Value: val}
+		scrapes <- scrapeResult{Name: fmt.Sprintf("config_%s", config[pos * 2]), Addr: addr, Value: val}
 	}
 	return nil
 }
 
-func (e *Exporter) scrape(scrapes chan<- scrapeResult) {
+func extractQueuesMetrics(queue string, queue_length float64, addr string, scrapes chan <- scrapeResult) error {
+	scrapes <- scrapeResult{Name: fmt.Sprintf("queue_%s", queue), Addr: addr, Value: queue_length}
+	return nil
+}
+
+func (e *Exporter) scrape(scrapes chan <- scrapeResult) {
 
 	defer close(scrapes)
 	now := time.Now().UnixNano()
@@ -269,11 +284,41 @@ func (e *Exporter) scrape(scrapes chan<- scrapeResult) {
 			errorCount++
 		}
 
+		queues, err := redis.Strings(c.Do("SMEMBERS", "queues"))
+		if err == nil {
+			for index := range queues {
+				queue := queues[index]
+				queue_length, err := redis.Int64(c.Do("LLEN", fmt.Sprintf("queue:%s", queue)))
+				if err != nil {
+					log.Printf("redis err: %s", err)
+					errorCount++
+				}
+				err = extractQueuesMetrics(queue, float64(queue_length), addr, scrapes)
+			}
+		}
+
+		schedule_length, err := redis.Int64(c.Do("ZCARD", "schedule"))
+		if err == nil {
+			err = extractQueuesMetrics("schedule", float64(schedule_length), addr, scrapes)
+		}
+		if err != nil {
+			log.Printf("redis err: %s", err)
+			errorCount++
+		}
+
+		retry_length, err := redis.Int64(c.Do("ZCARD", "retry"))
+		if err == nil {
+			err = extractQueuesMetrics("retry", float64(retry_length), addr, scrapes)
+		}
+		if err != nil {
+			log.Printf("redis err: %s", err)
+			errorCount++
+		}
 		c.Close()
 	}
 
 	e.scrapeErrors.Set(float64(errorCount))
-	e.duration.Set(float64(time.Now().UnixNano()-now) / 1000000000)
+	e.duration.Set(float64(time.Now().UnixNano() - now) / 1000000000)
 }
 
 func (e *Exporter) setMetrics(scrapes <-chan scrapeResult) {
@@ -294,7 +339,7 @@ func (e *Exporter) setMetrics(scrapes <-chan scrapeResult) {
 	}
 }
 
-func (e *Exporter) collectMetrics(metrics chan<- prometheus.Metric) {
+func (e *Exporter) collectMetrics(metrics chan <- prometheus.Metric) {
 	for _, m := range e.metrics {
 		m.Collect(metrics)
 	}
